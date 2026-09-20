@@ -966,6 +966,7 @@ terminal_profile_edit (TerminalProfile *profile,
 	CONNECT ("scroll-on-keystroke-checkbutton", TERMINAL_PROFILE_SCROLL_ON_KEYSTROKE);
 	CONNECT ("scroll-on-output-checkbutton", TERMINAL_PROFILE_SCROLL_ON_OUTPUT);
 	CONNECT ("show-menubar-checkbutton", TERMINAL_PROFILE_DEFAULT_SHOW_MENUBAR);
+	CONNECT ("show-tab-close-button-checkbutton", TERMINAL_PROFILE_SHOW_TAB_CLOSE_BUTTON);
 	CONNECT ("solid-radiobutton", TERMINAL_PROFILE_BACKGROUND_TYPE);
 	CONNECT ("system-font-checkbutton", TERMINAL_PROFILE_USE_SYSTEM_FONT);
 	CONNECT ("tab-colorpicker", TERMINAL_PROFILE_TAB_COLOR);

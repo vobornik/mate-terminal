@@ -138,6 +138,11 @@
       <summary>Default color of the notebook tab background</summary>
       <description>Default background color of the notebook tab for terminals using this profile, as a color specification (can be HTML-style hex digits, or a color name such as "red"). Only used if use_tab_color is true.</description>
     </key>
+    <key name="show-tab-close-button" type="b">
+      <default>true</default>
+      <summary>Whether to show the close button on tabs</summary>
+      <description>If false, new tabs opened with this profile do not show a close ("x") button, as a guard against accidentally closing them with a stray click. The tab can still be closed by other means (Ctrl+W, File &gt; Close Tab, middle-click, etc).</description>
+    </key>
     <key name="allow-bold" type="b">
       <default>true</default>
       <summary>Whether to allow bold text</summary>

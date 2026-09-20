@@ -2763,6 +2763,11 @@ terminal_window_add_screen (TerminalWindow *window,
     g_signal_connect (tab_label, "close-button-clicked",
                       G_CALLBACK (close_button_clicked_cb), screen_container);
 
+    /* The screen carries its own tab appearance (seeded from its profile when
+     * it was created), so a tab moved between windows keeps it. */
+    terminal_tab_label_set_close_button_visible (TERMINAL_TAB_LABEL (tab_label),
+                                                 terminal_screen_get_tab_close_button_visible (screen));
+
     gtk_notebook_insert_page (GTK_NOTEBOOK (priv->notebook),
                               screen_container,
                               tab_label,
@@ -2780,6 +2785,39 @@ terminal_window_add_screen (TerminalWindow *window,
                                      TRUE);
 
     terminal_window_queue_update_tab_colors (window);
+}
+
+/* Returns the TerminalTabLabel for @screen's notebook tab in @window, or
+ * NULL if @screen isn't a tab of @window or its tab label could not be
+ * found.
+ */
+static TerminalTabLabel *
+terminal_window_get_tab_label_for_screen (TerminalWindow *window,
+                                          TerminalScreen *screen)
+{
+    TerminalWindowPrivate *priv = window->priv;
+    TerminalScreenContainer *screen_container;
+    GtkNotebook *notebook;
+    GtkWidget *tab_label;
+    int page_num;
+
+    if (screen == NULL)
+        return NULL;
+
+    screen_container = terminal_screen_container_get_from_screen (screen);
+    if (screen_container == NULL)
+        return NULL;
+
+    notebook = GTK_NOTEBOOK (priv->notebook);
+    page_num = gtk_notebook_page_num (notebook, GTK_WIDGET (screen_container));
+    if (page_num == -1)
+        return NULL;
+
+    tab_label = gtk_notebook_get_tab_label (notebook, gtk_notebook_get_nth_page (notebook, page_num));
+    if (tab_label == NULL || !TERMINAL_IS_TAB_LABEL (tab_label))
+        return NULL;
+
+    return TERMINAL_TAB_LABEL (tab_label);
 }
 
 /* GtkNotebook keeps a scroll-arrow node inside its "tabs" node whenever the
@@ -4549,6 +4587,16 @@ terminal_next_or_previous_profile_cb (GtkAction *action,
     g_list_free (profiles);
 }
 
+/* Returns the TerminalTabLabel for the currently active screen's notebook
+ * tab, or NULL if there is no active screen or its tab label could not
+ * be found.
+ */
+static TerminalTabLabel *
+terminal_window_get_active_tab_label (TerminalWindow *window)
+{
+    return terminal_window_get_tab_label_for_screen (window, window->priv->active_screen);
+}
+
 static void
 terminal_customize_tab_dialog_response_cb (GtkWidget *dialog,
                                            int response,
@@ -4561,12 +4609,15 @@ terminal_customize_tab_dialog_response_cb (GtkWidget *dialog,
         GtkEntry *entry;
         GtkToggleButton *use_color_checkbutton;
         GtkColorButton *color_button;
+        GtkToggleButton *show_close_button_checkbutton;
+        TerminalTabLabel *tab_label;
 
         entry = GTK_ENTRY (g_object_get_data (G_OBJECT (dialog), "title-entry"));
         terminal_screen_set_user_title (screen, gtk_entry_get_text (entry));
 
         use_color_checkbutton = GTK_TOGGLE_BUTTON (g_object_get_data (G_OBJECT (dialog), "use-color-checkbutton"));
         color_button = GTK_COLOR_BUTTON (g_object_get_data (G_OBJECT (dialog), "color-button"));
+        show_close_button_checkbutton = GTK_TOGGLE_BUTTON (g_object_get_data (G_OBJECT (dialog), "show-close-button-checkbutton"));
 
         if (gtk_toggle_button_get_active (use_color_checkbutton))
         {
@@ -4581,6 +4632,14 @@ terminal_customize_tab_dialog_response_cb (GtkWidget *dialog,
             terminal_screen_set_tab_color (screen, NULL);
         }
         terminal_window_queue_update_tab_colors (window);
+
+        terminal_screen_set_tab_close_button_visible (screen,
+            gtk_toggle_button_get_active (show_close_button_checkbutton));
+
+        tab_label = terminal_window_get_active_tab_label (window);
+        if (tab_label != NULL)
+            terminal_tab_label_set_close_button_visible (tab_label,
+                terminal_screen_get_tab_close_button_visible (screen));
     }
 
     gtk_widget_destroy (dialog);
@@ -4594,7 +4653,7 @@ terminal_customize_tab_callback (GtkAction *action,
 {
     GtkBuilder *builder;
     TerminalWindowPrivate *priv = window->priv;
-    GtkWidget *dialog, *entry, *use_color_checkbutton, *color_button;
+    GtkWidget *dialog, *entry, *use_color_checkbutton, *color_button, *show_close_button_checkbutton;
     TerminalScreen *screen;
     const GdkRGBA *current_color;
 
@@ -4606,6 +4665,7 @@ terminal_customize_tab_callback (GtkAction *action,
     entry = GTK_WIDGET (gtk_builder_get_object (builder, "title_entry"));
     use_color_checkbutton = GTK_WIDGET (gtk_builder_get_object (builder, "use_color_checkbutton"));
     color_button = GTK_WIDGET (gtk_builder_get_object (builder, "color_button"));
+    show_close_button_checkbutton = GTK_WIDGET (gtk_builder_get_object (builder, "show_close_button_checkbutton"));
     g_object_unref (builder);
 
     gtk_widget_grab_focus (entry);
@@ -4634,9 +4694,13 @@ terminal_customize_tab_callback (GtkAction *action,
     /* Color button is only sensitive while "use custom color" is checked. */
     g_object_bind_property (use_color_checkbutton, "active", color_button, "sensitive", G_BINDING_SYNC_CREATE);
 
+    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (show_close_button_checkbutton),
+                                  terminal_screen_get_tab_close_button_visible (screen));
+
     g_object_set_data (G_OBJECT (dialog), "title-entry", entry);
     g_object_set_data (G_OBJECT (dialog), "use-color-checkbutton", use_color_checkbutton);
     g_object_set_data (G_OBJECT (dialog), "color-button", color_button);
+    g_object_set_data (G_OBJECT (dialog), "show-close-button-checkbutton", show_close_button_checkbutton);
 
     g_signal_connect (dialog, "response",
                       G_CALLBACK (terminal_customize_tab_dialog_response_cb), window);
