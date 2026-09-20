@@ -72,6 +72,11 @@ struct _TerminalWindowPrivate
     GtkWidget *main_vbox;
     TerminalScreen *active_screen;
 
+    /* Stylesheet colouring the notebook's tab nodes; see
+     * terminal_window_update_tab_colors(). */
+    GtkCssProvider *tab_color_provider;
+    guint tab_color_update_id;
+
     /* Size of a character cell in pixels */
     int old_char_width;
     int old_char_height;
@@ -229,8 +234,9 @@ static void search_clear_highlight_callback   (GtkAction *action,
         TerminalWindow *window);
 static void terminal_next_or_previous_profile_cb (GtkAction *action,
         TerminalWindow *window);
-static void terminal_set_title_callback       (GtkAction *action,
+static void terminal_customize_tab_callback   (GtkAction *action,
         TerminalWindow *window);
+static void terminal_window_queue_update_tab_colors (TerminalWindow *window);
 static void terminal_add_encoding_callback    (GtkAction *action,
         TerminalWindow *window);
 static void terminal_readonly_toggled_callback (GtkToggleAction *action,
@@ -2106,9 +2112,11 @@ terminal_window_init (TerminalWindow *window)
             G_CALLBACK (terminal_next_or_previous_profile_cb)
         },
         {
-            "TerminalSetTitle", NULL, N_("_Set Title…"), NULL,
+            /* Keep the action name "TerminalSetTitle" so the user's
+             * configured accelerator (see terminal-accels.c) still applies. */
+            "TerminalSetTitle", NULL, N_("Customize _Tab…"), NULL,
             NULL,
-            G_CALLBACK (terminal_set_title_callback)
+            G_CALLBACK (terminal_customize_tab_callback)
         },
         { "TerminalSetEncoding", NULL, N_("Set _Character Encoding"), NULL, NULL, NULL },
         {
@@ -2317,6 +2325,12 @@ terminal_window_init (TerminalWindow *window)
     gtk_widget_show (priv->main_vbox);
 
     priv->notebook = gtk_notebook_new ();
+
+    priv->tab_color_provider = gtk_css_provider_new ();
+    gtk_style_context_add_provider (gtk_widget_get_style_context (priv->notebook),
+                                    GTK_STYLE_PROVIDER (priv->tab_color_provider),
+                                    GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+
     gtk_notebook_set_scrollable (GTK_NOTEBOOK (priv->notebook), TRUE);
     gtk_notebook_set_show_border (GTK_NOTEBOOK (priv->notebook), FALSE);
     gtk_notebook_set_show_tabs (GTK_NOTEBOOK (priv->notebook), FALSE);
@@ -2335,6 +2349,9 @@ terminal_window_init (TerminalWindow *window)
                             G_CALLBACK (notebook_page_removed_callback), window);
     g_signal_connect_data (priv->notebook, "page-reordered",
                            G_CALLBACK (terminal_window_update_tabs_menu_sensitivity),
+                           window, NULL, G_CONNECT_SWAPPED | G_CONNECT_AFTER);
+    g_signal_connect_data (priv->notebook, "page-reordered",
+                           G_CALLBACK (terminal_window_queue_update_tab_colors),
                            window, NULL, G_CONNECT_SWAPPED | G_CONNECT_AFTER);
 
     gtk_widget_add_events (priv->notebook, GDK_SCROLL_MASK);
@@ -2472,6 +2489,13 @@ terminal_window_dispose (GObject *object)
         g_object_unref (priv->tabs_menu);
         priv->tabs_menu = NULL;
     }
+
+    if (priv->tab_color_update_id != 0)
+    {
+        g_source_remove (priv->tab_color_update_id);
+        priv->tab_color_update_id = 0;
+    }
+    g_clear_object (&priv->tab_color_provider);
 
     if (priv->profiles_action_group != NULL)
         disconnect_profiles_from_actions_in_group (priv->profiles_action_group);
@@ -2754,6 +2778,103 @@ terminal_window_add_screen (TerminalWindow *window,
     gtk_notebook_set_tab_detachable (GTK_NOTEBOOK (priv->notebook),
                                      screen_container,
                                      TRUE);
+
+    terminal_window_queue_update_tab_colors (window);
+}
+
+/* GtkNotebook keeps a scroll-arrow node inside its "tabs" node whenever the
+ * notebook is scrollable, shown or not, and :nth-child() counts it; the tab
+ * for page 0 is therefore the second child. */
+static guint
+notebook_tab_nth_child (GtkNotebook *notebook,
+                        int          page_num)
+{
+    return (guint) page_num + (gtk_notebook_get_scrollable (notebook) ? 2 : 1);
+}
+
+/* Rebuilds the stylesheet that gives individual tabs their custom colour.
+ *
+ * The colour goes on the notebook's own "tab" nodes rather than on the
+ * TerminalTabLabel inside them: that covers the whole tab, and leaves the
+ * theme to keep drawing its padding, rounding and active-tab indicator.
+ * GTK+ 3 exposes no way to reach one tab node, so tabs are addressed by
+ * position and the whole stylesheet is rebuilt whenever they change.
+ */
+static void
+terminal_window_update_tab_colors (TerminalWindow *window)
+{
+    TerminalWindowPrivate *priv = window->priv;
+    GtkNotebook *notebook;
+    GString *css;
+    int n_pages, i;
+
+    if (priv->tab_color_provider == NULL)
+        return;
+
+    notebook = GTK_NOTEBOOK (priv->notebook);
+    css = g_string_new (NULL);
+    n_pages = gtk_notebook_get_n_pages (notebook);
+
+    for (i = 0; i < n_pages; i++)
+    {
+        GtkWidget *container;
+        TerminalScreen *screen;
+        const GdkRGBA *rgba;
+        char *color_str;
+        guint nth;
+
+        container = gtk_notebook_get_nth_page (notebook, i);
+        if (!TERMINAL_IS_SCREEN_CONTAINER (container))
+            continue;
+
+        screen = terminal_screen_container_get_screen (TERMINAL_SCREEN_CONTAINER (container));
+        rgba = screen != NULL ? terminal_screen_get_tab_color (screen) : NULL;
+        if (rgba == NULL)
+            continue;
+
+        /* Active and inactive tabs get exactly the colour that was asked for:
+         * shading one of them would show a colour the user never picked, and
+         * tabs are normally coloured to tell them apart in the first place.
+         * background-image has to go as well, since themes commonly paint
+         * tabs with a gradient, which would cover background-color. */
+        nth = notebook_tab_nth_child (notebook, i);
+        color_str = gdk_rgba_to_string (rgba);
+        g_string_append_printf (css,
+                                "notebook tab:nth-child(%u) {"
+                                " background-image: none;"
+                                " background-color: %s; }\n",
+                                nth, color_str);
+        g_free (color_str);
+    }
+
+    gtk_css_provider_load_from_data (priv->tab_color_provider, css->str, -1, NULL);
+    g_string_free (css, TRUE);
+}
+
+static gboolean
+terminal_window_update_tab_colors_idle (gpointer user_data)
+{
+    TerminalWindow *window = user_data;
+
+    window->priv->tab_color_update_id = 0;
+    terminal_window_update_tab_colors (window);
+
+    return G_SOURCE_REMOVE;
+}
+
+/* A single drop fires "page-added" plus the two reorders that put the CSS node
+ * order right, and each of those would otherwise rebuild the whole stylesheet.
+ * Deferring to an idle collapses the burst into one rebuild, off the path of
+ * the notebook's own bookkeeping. */
+static void
+terminal_window_queue_update_tab_colors (TerminalWindow *window)
+{
+    TerminalWindowPrivate *priv = window->priv;
+
+    if (priv->tab_color_update_id != 0 || priv->disposed)
+        return;
+
+    priv->tab_color_update_id = g_idle_add (terminal_window_update_tab_colors_idle, window);
 }
 
 void
@@ -3138,11 +3259,11 @@ notebook_button_press_cb (GtkWidget *widget,
         }
     }
 
-    /* If the event is a double click, display the set title dialog */
+    /* If the event is a double click, display the customize tab dialog */
     if (event->type == GDK_DOUBLE_BUTTON_PRESS &&
         find_tab_num_at_pos (notebook, (int) event->x_root, (int) event->y_root) >= 0)
     {
-        terminal_set_title_callback (NULL, window);
+        terminal_customize_tab_callback (NULL, window);
 
         /* handle ONLY the double-click event */
         return TRUE;
@@ -3372,9 +3493,24 @@ notebook_page_added_callback (GtkWidget       *notebook,
     g_signal_connect (screen, "close-screen",
                       G_CALLBACK (screen_close_cb), window);
 
+    /* GTK+ 3 appends the new tab's CSS node rather than inserting it at the
+     * page's own index, so after a page lands anywhere but last, the node
+     * order no longer matches the page order and the :nth-child() selectors
+     * built by terminal_window_update_tab_colors() address the wrong tab. A
+     * reorder that really changes position does move the node, so bounce the
+     * page off the end and back: the page order ends up exactly as it was,
+     * and the node order is put right. */
+    pages = gtk_notebook_get_n_pages (GTK_NOTEBOOK (notebook));
+    if ((int) page_num < pages - 1)
+    {
+        gtk_notebook_reorder_child (GTK_NOTEBOOK (notebook), container, pages - 1);
+        gtk_notebook_reorder_child (GTK_NOTEBOOK (notebook), container, page_num);
+    }
+
     update_tab_visibility (window, 0);
     terminal_window_update_tabs_menu_sensitivity (window);
     terminal_window_update_search_sensitivity (screen, window);
+    terminal_window_queue_update_tab_colors (window);
 
 #if 0
     /* FIXMEchpe: wtf is this doing? */
@@ -3463,6 +3599,7 @@ notebook_page_removed_callback (GtkWidget       *notebook,
     terminal_window_update_tabs_menu_sensitivity (window);
     update_tab_visibility (window, 0);
     terminal_window_update_search_sensitivity (screen, window);
+    terminal_window_queue_update_tab_colors (window);
 
     pages = gtk_notebook_get_n_pages (GTK_NOTEBOOK (notebook));
     if (pages == 1)
@@ -4413,47 +4550,96 @@ terminal_next_or_previous_profile_cb (GtkAction *action,
 }
 
 static void
-terminal_set_title_dialog_response_cb (GtkWidget *dialog,
-                                       int response,
-                                       TerminalScreen *screen)
+terminal_customize_tab_dialog_response_cb (GtkWidget *dialog,
+                                           int response,
+                                           TerminalWindow *window)
 {
-    if (response == GTK_RESPONSE_OK)
+    TerminalScreen *screen = window->priv->active_screen;
+
+    if (response == GTK_RESPONSE_OK && screen != NULL)
     {
         GtkEntry *entry;
-        const char *text;
+        GtkToggleButton *use_color_checkbutton;
+        GtkColorButton *color_button;
 
         entry = GTK_ENTRY (g_object_get_data (G_OBJECT (dialog), "title-entry"));
-        text = gtk_entry_get_text (entry);
-        terminal_screen_set_user_title (screen, text);
+        terminal_screen_set_user_title (screen, gtk_entry_get_text (entry));
+
+        use_color_checkbutton = GTK_TOGGLE_BUTTON (g_object_get_data (G_OBJECT (dialog), "use-color-checkbutton"));
+        color_button = GTK_COLOR_BUTTON (g_object_get_data (G_OBJECT (dialog), "color-button"));
+
+        if (gtk_toggle_button_get_active (use_color_checkbutton))
+        {
+            GdkRGBA rgba;
+
+            gtk_color_chooser_get_rgba (GTK_COLOR_CHOOSER (color_button), &rgba);
+            rgba.alpha = 1.0;
+            terminal_screen_set_tab_color (screen, &rgba);
+        }
+        else
+        {
+            terminal_screen_set_tab_color (screen, NULL);
+        }
+        terminal_window_queue_update_tab_colors (window);
     }
 
     gtk_widget_destroy (dialog);
-    gtk_widget_grab_focus (GTK_WIDGET (screen));
+    if (screen != NULL)
+        gtk_widget_grab_focus (GTK_WIDGET (screen));
 }
 
 static void
-terminal_set_title_callback (GtkAction *action,
-                             TerminalWindow *window)
+terminal_customize_tab_callback (GtkAction *action,
+                                 TerminalWindow *window)
 {
     GtkBuilder *builder;
     TerminalWindowPrivate *priv = window->priv;
-    GtkWidget *dialog, *entry;
+    GtkWidget *dialog, *entry, *use_color_checkbutton, *color_button;
+    TerminalScreen *screen;
+    const GdkRGBA *current_color;
 
     if (priv->active_screen == NULL)
         return;
 
-    builder = gtk_builder_new_from_resource (TERMINAL_RESOURCES_PATH_PREFIX G_DIR_SEPARATOR_S "ui/set-title-dialog.ui");
+    builder = gtk_builder_new_from_resource (TERMINAL_RESOURCES_PATH_PREFIX G_DIR_SEPARATOR_S "ui/customize-tab-dialog.ui");
     dialog = GTK_WIDGET (gtk_builder_get_object (builder, "dialog"));
     entry = GTK_WIDGET (gtk_builder_get_object (builder, "title_entry"));
+    use_color_checkbutton = GTK_WIDGET (gtk_builder_get_object (builder, "use_color_checkbutton"));
+    color_button = GTK_WIDGET (gtk_builder_get_object (builder, "color_button"));
     g_object_unref (builder);
 
     gtk_widget_grab_focus (entry);
     gtk_entry_set_text (GTK_ENTRY (entry), terminal_screen_get_raw_title (priv->active_screen));
     gtk_editable_select_region (GTK_EDITABLE (entry), 0, -1);
+
+    /* GtkColorButton gives us both a palette of basic colors and a "+"
+     * custom color picker out of the box. */
+    gtk_color_chooser_set_use_alpha (GTK_COLOR_CHOOSER (color_button), FALSE);
+
+    screen = priv->active_screen;
+    current_color = terminal_screen_get_tab_color (screen);
+
+    /* With no color set yet, offer the profile default rather than the color
+     * button's own default, which is opaque black: the color the dialog shows
+     * has to be the color it would apply. */
+    if (current_color == NULL)
+        current_color = terminal_profile_get_property_boxed (terminal_screen_get_profile (screen),
+                                                             TERMINAL_PROFILE_TAB_COLOR);
+    if (current_color != NULL)
+        gtk_color_chooser_set_rgba (GTK_COLOR_CHOOSER (color_button), current_color);
+
+    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (use_color_checkbutton),
+                                  terminal_screen_get_tab_color (screen) != NULL);
+
+    /* Color button is only sensitive while "use custom color" is checked. */
+    g_object_bind_property (use_color_checkbutton, "active", color_button, "sensitive", G_BINDING_SYNC_CREATE);
+
     g_object_set_data (G_OBJECT (dialog), "title-entry", entry);
+    g_object_set_data (G_OBJECT (dialog), "use-color-checkbutton", use_color_checkbutton);
+    g_object_set_data (G_OBJECT (dialog), "color-button", color_button);
 
     g_signal_connect (dialog, "response",
-                      G_CALLBACK (terminal_set_title_dialog_response_cb), priv->active_screen);
+                      G_CALLBACK (terminal_customize_tab_dialog_response_cb), window);
     g_signal_connect (dialog, "delete-event",
                       G_CALLBACK (terminal_util_dialog_response_on_delete), NULL);
 
