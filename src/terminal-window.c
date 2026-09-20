@@ -2915,6 +2915,28 @@ terminal_window_queue_update_tab_colors (TerminalWindow *window)
     priv->tab_color_update_id = g_idle_add (terminal_window_update_tab_colors_idle, window);
 }
 
+/**
+ * terminal_window_set_screen_tab_color:
+ * @window: a #TerminalWindow
+ * @screen: a #TerminalScreen already added to @window
+ * @rgba: (nullable): the color to give @screen's notebook tab, or %NULL to
+ *   leave the tab its normal theme color
+ *
+ * Used to apply a --tab-color command line override once @screen's tab has
+ * been created.
+ */
+void
+terminal_window_set_screen_tab_color (TerminalWindow *window,
+                                      TerminalScreen *screen,
+                                      const GdkRGBA  *rgba)
+{
+    g_return_if_fail (TERMINAL_IS_WINDOW (window));
+    g_return_if_fail (TERMINAL_IS_SCREEN (screen));
+
+    terminal_screen_set_tab_color (screen, rgba);
+    terminal_window_queue_update_tab_colors (window);
+}
+
 void
 terminal_window_remove_screen (TerminalWindow *window,
                                TerminalScreen *screen)
@@ -3894,7 +3916,7 @@ file_new_window_callback (GtkAction *action,
 
     new_working_directory = terminal_screen_get_current_dir (priv->active_screen);
     terminal_app_new_terminal (app, new_window, profile,
-                               NULL, NULL,
+                               NULL, NULL, NULL,
                                new_working_directory,
                                terminal_screen_get_initial_environment (priv->active_screen),
                                1.0);
@@ -3926,7 +3948,7 @@ file_new_tab_callback (GtkAction *action,
 
     new_working_directory = terminal_screen_get_current_dir (priv->active_screen);
     terminal_app_new_terminal (app, window, profile,
-                               NULL, NULL,
+                               NULL, NULL, NULL,
                                new_working_directory,
                                terminal_screen_get_initial_environment (priv->active_screen),
                                1.0);
